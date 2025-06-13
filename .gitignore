@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Azure Functions
+local.settings.json
+.vscode/
+.azure/
+.func/
+
+# MacOS
+.DS_Store
+
+# IDE
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Environment variables
+.env
+
+weather.csv
+クラフトビール売上データ_2024年4月-2025年3月.csv
