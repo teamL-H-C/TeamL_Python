@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime
+from functools import lru_cache
+import asyncio
 
 # 尝试导入必要的库
 try:
@@ -21,6 +23,9 @@ class BeerSalesPredictorAzure:
     def __init__(self, model_dir_name="models"):
         self.models = {}
         self.weather_label_encoder = None
+        # 添加简单的内存缓存
+        self._weather_cache = {}
+        self._cache_max_size = 100  # 最大缓存条目数
         
         # 特征列名和顺序：必须与您在 Colab 中训练时使用的完全一致
         self.feature_cols_from_colab = [
@@ -87,8 +92,30 @@ class BeerSalesPredictorAzure:
         else:
             logging.warning(f"LabelEncoder 文件未找到: {encoder_file}")
 
+    def _get_cached_weather_data(self, date_str):
+        """从缓存中获取天气数据"""
+        return self._weather_cache.get(date_str)
+    
+    def _cache_weather_data(self, date_str, weather_features):
+        """缓存天气数据"""
+        if len(self._weather_cache) >= self._cache_max_size:
+            # 移除最旧的缓存条目
+            oldest_key = next(iter(self._weather_cache))
+            del self._weather_cache[oldest_key]
+        
+        self._weather_cache[date_str] = pd.DataFrame([
+            [weather_features.get(col, 0) for col in self.feature_cols_from_colab]
+        ], columns=self.feature_cols_from_colab)
+
     def _get_future_weather_data_and_prepare_features(self, date_str):
         logging.info(f"正在为日期 {date_str} 获取天气数据...")
+        
+        # 添加缓存装饰器以避免重复API调用
+        cached_weather = self._get_cached_weather_data(date_str)
+        if cached_weather is not None:
+            logging.info(f"使用缓存的天气数据: {cached_weather.to_dict(orient='records')[0]}")
+            return cached_weather
+            
         latitude = 35.6895
         longitude = 139.6917
         
@@ -103,7 +130,8 @@ class BeerSalesPredictorAzure:
         
         raw_weather_features = {}
         try:
-            response = requests.get(api_url, timeout=10)
+            # 减少超时时间以快速失败
+            response = requests.get(api_url, timeout=5)
             response.raise_for_status()
             data = response.json()["daily"]
 
@@ -118,9 +146,12 @@ class BeerSalesPredictorAzure:
             raw_weather_features["曜日番号"] = date_obj.weekday()  # Monday=0, Sunday=6
 
             logging.info(f"获取并处理的天气特征: {raw_weather_features}")
+            
+            # 缓存结果
+            self._cache_weather_data(date_str, raw_weather_features)
 
         except requests.exceptions.RequestException as e:
-            logging.error(f"获取天气数据失败: {e}。将使用默认天气特征。")
+            logging.warning(f"获取天气数据失败: {e}。将使用默认天气特征。")
             # 如果API失败，使用默认值
             from datetime import datetime
             date_obj = datetime.strptime(date_str, "%Y-%m-%d")
@@ -144,6 +175,12 @@ class BeerSalesPredictorAzure:
         if not self.models:
             logging.error("模型未加载。无法进行预测。")
             return {"error": "模型服务未正确初始化。"}
+
+        # 首先检查缓存的预测结果
+        cache_key = f"prediction_{date_str}"
+        if hasattr(self, '_prediction_cache') and cache_key in self._prediction_cache:
+            logging.info(f"从缓存返回预测结果: {date_str}")
+            return self._prediction_cache[cache_key]
 
         features_df = self._get_future_weather_data_and_prepare_features(date_str)
         if features_df.empty:
@@ -188,6 +225,14 @@ class BeerSalesPredictorAzure:
                     "黒ビール(本)": default_value,
                     "フルーツビール(本)": default_value
                 }
+            
+            # 缓存预测结果
+            if not hasattr(self, '_prediction_cache'):
+                self._prediction_cache = {}
+            if len(self._prediction_cache) >= 50:  # 限制缓存大小
+                oldest_key = next(iter(self._prediction_cache))
+                del self._prediction_cache[oldest_key]
+            self._prediction_cache[cache_key] = beer_predictions
             
             return beer_predictions
             
