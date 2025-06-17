@@ -143,54 +143,129 @@ class BeerSalesPredictorAzure:
     def predict_sales_for_date(self, date_str):
         if not self.models:
             logging.error("模型未加载。无法进行预测。")
-            return [{"error": "模型服务未正确初始化。"}]
+            return {"error": "模型服务未正确初始化。"}
 
         features_df = self._get_future_weather_data_and_prepare_features(date_str)
         if features_df.empty:
             logging.error("无法为预测准备特征。")
-            return [{"error": "无法准备预测特征。"}]
+            return {"error": "无法准备预测特征。"}
             
-        all_predictions = []
-        beer_id_counter = 1
+        # 获取模型（假设所有啤酒使用同一个模型）
+        model_to_use = list(self.models.values())[0] if self.models else None
         
-        for beer_col_name_target in self.beer_names_for_output_ordered:
-            model_to_use = self.models.get(beer_col_name_target)
+        if not model_to_use:
+            logging.error("没有可用的模型。")
+            return {"error": "没有可用的模型。"}
+        
+        try:
+            # 进行预测，模型应该输出所有6种啤酒的预测值
+            prediction_result = model_to_use.predict(features_df)
             
-            predicted_quantity = 10  # 默认值
-            error_message = None
-            comment = None
-
-            if model_to_use:
-                try:
-                    prediction_result = model_to_use.predict(features_df)
-                    # 处理可能的多维输出
-                    if hasattr(prediction_result, 'flatten'):
-                        predicted_quantity_float = float(prediction_result.flatten()[0])
-                    else:
-                        predicted_quantity_float = float(prediction_result[0])
-                    predicted_quantity = max(0, int(round(predicted_quantity_float)))
-                except Exception as e:
-                    logging.error(f"为 {beer_col_name_target} 预测时出错: {e}")
-                    error_message = str(e)
-                    comment = "预测时发生错误"
+            # 处理预测结果
+            if hasattr(prediction_result, 'flatten'):
+                predictions = prediction_result.flatten()
             else:
-                logging.warning(f"{beer_col_name_target} 的模型未找到。")
-                comment = "模型不可用"
+                predictions = prediction_result[0] if len(prediction_result.shape) > 1 else prediction_result
             
-            prediction_item = {
-                "beer_id": beer_id_counter,
-                "beer_name": beer_col_name_target.replace("(本)", ""),
-                "predicted_quantity": predicted_quantity
+            # 确保有6个预测值（对应6种啤酒）
+            if len(predictions) >= 6:
+                beer_predictions = {
+                    "ペールエール(本)": max(0, int(round(float(predictions[0])))),
+                    "ラガー(本)": max(0, int(round(float(predictions[1])))),
+                    "IPA(本)": max(0, int(round(float(predictions[2])))),
+                    "ホワイトビール(本)": max(0, int(round(float(predictions[3])))),
+                    "黒ビール(本)": max(0, int(round(float(predictions[4])))),
+                    "フルーツビール(本)": max(0, int(round(float(predictions[5]))))
+                }
+            else:
+                # 如果预测值不足6个，使用相同的值
+                default_value = max(0, int(round(float(predictions[0])))) if len(predictions) > 0 else 5
+                beer_predictions = {
+                    "ペールエール(本)": default_value,
+                    "ラガー(本)": default_value,
+                    "IPA(本)": default_value,
+                    "ホワイトビール(本)": default_value,
+                    "黒ビール(本)": default_value,
+                    "フルーツビール(本)": default_value
+                }
+            
+            return beer_predictions
+            
+        except Exception as e:
+            logging.error(f"预测时出错: {e}")
+            return {"error": f"预测时发生错误: {str(e)}"}
+
+    def predict_weekly_shipment(self, start_date_str):
+        """
+        根据起始日期预测一周的出货汇总
+        类似于 Colab notebook 中的发注用ビール出荷集計
+        """
+        from datetime import datetime, timedelta
+        
+        try:
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+        except ValueError:
+            return {"error": "日期格式无效"}
+        
+        # 生成未来7天的日期
+        daily_predictions = []
+        for i in range(7):
+            current_date = start_date + timedelta(days=i)
+            date_str = current_date.strftime("%Y-%m-%d")
+            weekday = current_date.weekday()  # 0=Monday, 6=Sunday
+            
+            prediction = self.predict_sales_for_date(date_str)
+            if "error" in prediction:
+                continue
+                
+            daily_predictions.append({
+                "date": date_str,
+                "weekday": weekday,
+                "predictions": prediction
+            })
+        
+        if not daily_predictions:
+            return {"error": "无法生成预测数据"}
+        
+        # 按照 Colab 逻辑分组：
+        # 月曜用（火水木 = weekday 1,2,3）
+        # 木曜用（金土日 = weekday 4,5,6,0）
+        monday_group = []  # 火水木
+        thursday_group = []  # 金土日月
+        
+        for pred in daily_predictions:
+            weekday = pred["weekday"]
+            if weekday in [1, 2, 3]:  # 火水木
+                monday_group.append(pred)
+            elif weekday in [4, 5, 6, 0]:  # 金土日月
+                thursday_group.append(pred)
+        
+        # 计算汇总
+        def sum_group(group):
+            total = {
+                "ペールエール(本)": 0,
+                "ラガー(本)": 0, 
+                "IPA(本)": 0,
+                "ホワイトビール(本)": 0,
+                "黒ビール(本)": 0,
+                "フルーツビール(本)": 0
             }
-            if error_message:
-                prediction_item["error"] = error_message
-            if comment:
-                prediction_item["comment"] = comment
-            
-            all_predictions.append(prediction_item)
-            beer_id_counter += 1
-            
-        return all_predictions
+            for pred in group:
+                for beer, quantity in pred["predictions"].items():
+                    if beer in total:
+                        total[beer] += quantity
+            return total
+        
+        monday_sum = sum_group(monday_group)
+        thursday_sum = sum_group(thursday_group)
+        
+        return {
+            "🍻 発注用ビール出荷集計": {
+                "月曜用の出荷集計": monday_sum,
+                "木曜用の出荷集計": thursday_sum
+            },
+            "daily_details": daily_predictions
+        }
 
 # 全局初始化预测器实例
 try:
@@ -231,12 +306,59 @@ def predict_beer_sales(req: func.HttpRequest) -> func.HttpResponse:
              charset="utf-8"
         )
 
-    predictions_list = predictor.predict_sales_for_date(request_date_str)
+    predictions_result = predictor.predict_sales_for_date(request_date_str)
 
     response_data = {
         "requested_date": request_date_str,
-        "predictions": predictions_list,
-        "comment": "实际模型预测数据"
+        "predictions": predictions_result,
+        "comment": "実際の機械学習モデル予測データ"
+    }
+
+    return func.HttpResponse(
+        json.dumps(response_data, ensure_ascii=False, indent=2),
+        status_code=200,
+        mimetype="application/json",
+        charset="utf-8"
+    )
+
+@app.route(route="weekly", methods=["GET"])
+def predict_weekly_beer_shipment(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    周単位のビール出荷予測 API（Colab notebook 形式）
+    """
+    logging.info('週単位ビール出荷予測 API が呼び出されました')
+
+    if predictor is None or not predictor.models:
+        logging.error("予測器サービスが初期化されていないか、モデルが読み込まれていません。")
+        return func.HttpResponse(
+             json.dumps({"error": "予測サービスは現在利用できません。しばらくしてから再試行してください。"}),
+             status_code=503,
+             mimetype="application/json",
+             charset="utf-8"
+        )
+
+    request_date_str = req.params.get('start_date')
+    if not request_date_str:
+        logging.warning("開始日付パラメータが提供されていません。デフォルト日付を使用します。")
+        request_date_str = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        datetime.strptime(request_date_str, "%Y-%m-%d")
+    except ValueError:
+        logging.error(f"無効な日付形式: {request_date_str}")
+        return func.HttpResponse(
+             json.dumps({"error": "YYYY-MM-DD形式の日付を提供してください。"}),
+             status_code=400,
+             mimetype="application/json",
+             charset="utf-8"
+        )
+
+    weekly_predictions = predictor.predict_weekly_shipment(request_date_str)
+
+    response_data = {
+        "start_date": request_date_str,
+        "shipment_summary": weekly_predictions,
+        "comment": "Colab notebook形式の週単位出荷予測"
     }
 
     return func.HttpResponse(
