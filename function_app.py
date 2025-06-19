@@ -5,9 +5,8 @@ import os
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
-import asyncio
 
 # 尝试导入必要的库
 try:
@@ -18,47 +17,40 @@ except ImportError:
 # Azure Functions v2 プログラミングモデルを使用
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
-# --- 啤酒销售预测器类 ---
+# --- 分类函数（从 notebook 移植） ---
+def classify_rainfall(x):
+    """降水量分类函数"""
+    if x == 0:
+        return 0  # 无雨
+    elif x <= 10:
+        return 1  # 小雨
+    else:
+        return 2  # 大雨
+
+def classify_wind(x):
+    """风速分类函数"""
+    if x <= 3:
+        return 0  # 轻风
+    elif x <= 10:
+        return 1  # 中风
+    else:
+        return 2  # 强风
+
+# --- 改进的啤酒销售预测器类（使用统一RandomForest模型） ---
 class BeerSalesPredictorAzure:
     def __init__(self, model_dir_name="models"):
-        self.models = {}
+        self.unified_model = None
+        self.improved_features = None
+        self.beer_sales_columns = None
         self.weather_label_encoder = None
-        # 添加简单的内存缓存
+        # 缓存系统 - 天气缓存和周预测缓存
         self._weather_cache = {}
-        self._cache_max_size = 100  # 最大缓存条目数
+        self._weekly_cache = {}  # 新增：周预测结果缓存
+        self._cache_max_size = 100
         
-        # 特征列名和顺序：必须与您在 Colab 中训练时使用的完全一致
-        self.feature_cols_from_colab = [
-            "平均気温(℃)",
-            "降水量の合計(mm)",
-            "平均風速(m/s)",
-            "平均湿度(％)",
-            "曜日番号"
-        ]
+        self._load_models_and_features(model_dir_name)
 
-        # 啤酒模型映射 - 根据您从Colab保存的模型调整
-        self.beer_target_col_to_model_key = {
-            "ペールエール(本)": "decision_tree_model",  # 假设您的模型是这个名字
-            "ラガー(本)": "decision_tree_model",
-            "IPA(本)": "decision_tree_model", 
-            "ホワイトビール(本)": "decision_tree_model",
-            "黒ビール(本)": "decision_tree_model",
-            "フルーツビール(本)": "decision_tree_model"
-        }
-        
-        # API 输出顺序
-        self.beer_names_for_output_ordered = [
-            "ホワイトビール(本)",
-            "ラガー(本)", 
-            "ペールエール(本)",
-            "フルーツビール(本)",
-            "黒ビール(本)",
-            "IPA(本)"
-        ]
-
-        self._load_models_and_encoder(model_dir_name)
-
-    def _load_models_and_encoder(self, model_dir_name):
+    def _load_models_and_features(self, model_dir_name):
         script_dir = os.path.dirname(__file__)
         actual_model_dir = os.path.join(script_dir, model_dir_name)
         logging.info(f"尝试从以下目录加载模型: {actual_model_dir}")
@@ -67,59 +59,150 @@ class BeerSalesPredictorAzure:
             logging.error(f"模型目录未找到: {actual_model_dir}")
             return
 
-        # 加载决策树模型 (假设您只有一个决策树模型用于所有啤酒)
-        model_file = os.path.join(actual_model_dir, "decision_tree_model.joblib")
+        # 加载统一的RandomForest模型
+        model_file = os.path.join(actual_model_dir, "unified_rf_model.joblib")
         if os.path.exists(model_file):
             try:
-                shared_model = joblib.load(model_file)
-                # 为所有啤酒类型使用同一个模型
-                for beer_col_name in self.beer_target_col_to_model_key.keys():
-                    self.models[beer_col_name] = shared_model
-                logging.info(f"已加载共享模型: {model_file}")
+                self.unified_model = joblib.load(model_file)
+                logging.info(f"已加载统一RandomForest模型: {model_file}")
             except Exception as e:
-                logging.error(f"加载模型 {model_file} 失败: {e}")
+                logging.error(f"加载统一模型 {model_file} 失败: {e}")
         else:
-            logging.warning(f"模型文件未找到: {model_file}")
+            logging.warning(f"统一模型文件未找到: {model_file}")
 
-        # 加载天气 LabelEncoder
+        # 加载特征列表
+        features_file = os.path.join(actual_model_dir, "improved_features.joblib")
+        if os.path.exists(features_file):
+            try:
+                self.improved_features = joblib.load(features_file)
+                logging.info(f"已加载特征列表: {features_file}")
+            except Exception as e:
+                logging.error(f"加载特征列表失败: {e}")
+        else:
+            logging.warning(f"特征列表文件未找到: {features_file}")
+
+        # 加载啤酒列名
+        beer_cols_file = os.path.join(actual_model_dir, "beer_sales_columns.joblib")
+        if os.path.exists(beer_cols_file):
+            try:
+                self.beer_sales_columns = joblib.load(beer_cols_file)
+                logging.info(f"已加载啤酒列名: {beer_cols_file}")
+            except Exception as e:
+                logging.error(f"加载啤酒列名失败: {e}")
+        else:
+            logging.warning(f"啤酒列名文件未找到: {beer_cols_file}")
+
+        # 加载天气 LabelEncoder（保持向后兼容）
         encoder_file = os.path.join(actual_model_dir, "weather_label_encoder.joblib")
         if os.path.exists(encoder_file):
             try:
                 self.weather_label_encoder = joblib.load(encoder_file)
                 logging.info(f"已加载 LabelEncoder: {encoder_file}")
             except Exception as e:
-                logging.error(f"加载 LabelEncoder {encoder_file} 失败: {e}")
-        else:
-            logging.warning(f"LabelEncoder 文件未找到: {encoder_file}")
+                logging.error(f"加载 LabelEncoder 失败: {e}")
 
     def _get_cached_weather_data(self, date_str):
         """从缓存中获取天气数据"""
         return self._weather_cache.get(date_str)
     
-    def _cache_weather_data(self, date_str, weather_features):
+    def _cache_weather_data(self, date_str, weather_df):
         """缓存天气数据"""
         if len(self._weather_cache) >= self._cache_max_size:
-            # 移除最旧的缓存条目
             oldest_key = next(iter(self._weather_cache))
             del self._weather_cache[oldest_key]
-        
-        self._weather_cache[date_str] = pd.DataFrame([
-            [weather_features.get(col, 0) for col in self.feature_cols_from_colab]
-        ], columns=self.feature_cols_from_colab)
+        self._weather_cache[date_str] = weather_df
+
+    def _get_cached_weekly_data(self, start_date_str):
+        """从缓存中获取周预测数据"""
+        logging.info(f"查找缓存数据，start_date: {start_date_str}")
+        logging.info(f"当前缓存大小: {len(self._weekly_cache)}")
+        logging.info(f"缓存键列表: {list(self._weekly_cache.keys())}")
+        result = self._weekly_cache.get(start_date_str)
+        logging.info(f"缓存查找结果: {'找到' if result is not None else '未找到'}")
+        return result
+    
+    def _cache_weekly_data(self, start_date_str, weekly_result):
+        """缓存周预测数据"""
+        logging.info(f"正在缓存周预测数据，start_date: {start_date_str}")
+        if len(self._weekly_cache) >= self._cache_max_size:
+            oldest_key = next(iter(self._weekly_cache))
+            del self._weekly_cache[oldest_key]
+            logging.info(f"删除最旧的缓存项: {oldest_key}")
+        self._weekly_cache[start_date_str] = weekly_result
+        logging.info(f"缓存成功，当前缓存大小: {len(self._weekly_cache)}")
+        logging.info(f"缓存键列表: {list(self._weekly_cache.keys())}")
+
+    def _preprocess_weather_data(self, df_weather):
+        """
+        对天气数据进行特徴量エンジニアリング（从 notebook 移植）
+        """
+        df_weather = df_weather.copy()
+
+        # 确保必要的时间信息
+        if '日付' in df_weather.columns:
+            df_weather['year'] = df_weather['日付'].dt.year
+            df_weather['month'] = df_weather['日付'].dt.month
+            df_weather['day'] = df_weather['日付'].dt.day
+            df_weather['weekday'] = df_weather['日付'].dt.weekday
+            df_weather['曜日番号'] = df_weather['weekday']
+
+        # 特徴量作成
+        df_weather['温度差'] = df_weather['最高気温(℃)'] - df_weather['最低気温(℃)']
+        df_weather['温度変化率'] = df_weather['温度差'] / (df_weather['平均気温(℃)'] + 1e-6)
+        df_weather['快適度指数'] = (
+            (df_weather['平均気温(℃)'] - 20).abs() * -1 +
+            (df_weather['平均湿度(％)'] - 60).abs() * -0.5 +
+            df_weather['降水量の合計(mm)'] * -2
+        )
+        df_weather['季節'] = df_weather['month'].map({
+            12: 0, 1: 0, 2: 0,  # 冬
+            3: 1, 4: 1, 5: 1,   # 春
+            6: 2, 7: 2, 8: 2,   # 夏
+            9: 3, 10: 3, 11: 3  # 秋
+        })
+        df_weather['週末フラグ'] = (df_weather['weekday'] >= 5).astype(int)
+        df_weather['良天気'] = 0  # APIには天気概況がないので一律0
+
+        # 降水・风速分类
+        df_weather['風速分類'] = df_weather['最大風速(m/s)'].apply(classify_wind)
+        df_weather['降水量分類'] = df_weather['降水量の合計(mm)'].apply(classify_rainfall)
+
+        # ダミー変数化
+        df_weather = pd.get_dummies(df_weather, columns=["降水量分類", "風速分類"], 
+                                  prefix=["降水量", "風速"], dtype=int)
+
+        # 曜日のダミー変数
+        for i in range(7):
+            df_weather[f'曜日_{i}'] = (df_weather['曜日番号'] == i).astype(int)
+
+        # 天気概況のエンコード（API には天気概況がないので 0 で固定）
+        df_weather['天気概況_encoded'] = 0
+
+        # 欠損補完（学習用特徴量と合わせる）
+        if self.improved_features:
+            for col in self.improved_features:
+                if col not in df_weather.columns:
+                    df_weather[col] = 0
+
+        return df_weather
 
     def _get_future_weather_data_and_prepare_features(self, date_str):
         logging.info(f"正在为日期 {date_str} 获取天气数据...")
         
-        # 添加缓存装饰器以避免重复API调用
+        # 检查缓存
         cached_weather = self._get_cached_weather_data(date_str)
         if cached_weather is not None:
-            logging.info(f"使用缓存的天气数据: {cached_weather.to_dict(orient='records')[0]}")
+            logging.info(f"使用缓存的天气数据")
             return cached_weather
             
         latitude = 35.6895
         longitude = 139.6917
         
-        open_meteo_params = "temperature_2m_mean,precipitation_sum,windspeed_10m_mean,relative_humidity_2m_mean"
+        # 改进的API参数（从 notebook 移植）
+        open_meteo_params = ("temperature_2m_max,temperature_2m_mean,temperature_2m_min,"
+                           "precipitation_sum,wind_speed_10m_max,relative_humidity_2m_mean,"
+                           "shortwave_radiation_sum,pressure_msl_mean")
+        
         api_url = (
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={latitude}&longitude={longitude}"
@@ -128,111 +211,76 @@ class BeerSalesPredictorAzure:
             f"&start_date={date_str}&end_date={date_str}"
         )
         
-        raw_weather_features = {}
         try:
-            # 减少超时时间以快速失败
-            response = requests.get(api_url, timeout=5)
+            response = requests.get(api_url, timeout=10)
             response.raise_for_status()
             data = response.json()["daily"]
 
-            raw_weather_features["平均気温(℃)"] = data.get("temperature_2m_mean", [20.0])[0]
-            raw_weather_features["降水量の合計(mm)"] = data.get("precipitation_sum", [0.0])[0]
-            raw_weather_features["平均風速(m/s)"] = data.get("windspeed_10m_mean", [3.0])[0]
-            raw_weather_features["平均湿度(％)"] = data.get("relative_humidity_2m_mean", [60.0])[0]
-            
-            # 计算曜日番号（星期几）：月曜日=0, 火曜日=1, ..., 日曜日=6
-            from datetime import datetime
+            # 创建天气DataFrame（与 notebook 一致）
             date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-            raw_weather_features["曜日番号"] = date_obj.weekday()  # Monday=0, Sunday=6
+            df_weather = pd.DataFrame({
+                "日付": [date_obj],
+                "最高気温(℃)": data.get("temperature_2m_max", [20.0]),
+                "平均気温(℃)": data.get("temperature_2m_mean", [20.0]),
+                "最低気温(℃)": data.get("temperature_2m_min", [15.0]),
+                "降水量の合計(mm)": data.get("precipitation_sum", [0.0]),
+                "最大風速(m/s)": [v / 3.6 for v in data.get("wind_speed_10m_max", [10.8])],  # km/h → m/s
+                "平均湿度(％)": data.get("relative_humidity_2m_mean", [60.0]),
+                "合計全天日射量(MJ/㎡)": data.get("shortwave_radiation_sum", [15.0]),
+                "平均現地気圧(hPa)": data.get("pressure_msl_mean", [1013.25])
+            })
 
-            logging.info(f"获取并处理的天气特征: {raw_weather_features}")
+            # 「平均風速(m/s)」を「最大風速(m/s)」で代用
+            df_weather["平均風速(m/s)"] = df_weather["最大風速(m/s)"]
+            df_weather["曜日番号"] = date_obj.weekday()
+
+            # 应用特征工程
+            processed_weather = self._preprocess_weather_data(df_weather)
             
             # 缓存结果
-            self._cache_weather_data(date_str, raw_weather_features)
+            self._cache_weather_data(date_str, processed_weather)
+            
+            logging.info(f"成功获取并处理天气数据")
+            return processed_weather
 
         except requests.exceptions.RequestException as e:
             logging.warning(f"获取天气数据失败: {e}。将使用默认天气特征。")
-            # 如果API失败，使用默认值
-            from datetime import datetime
+            
+            # 使用默认值创建DataFrame
             date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-            raw_weather_features = {
-                "平均気温(℃)": 20.0, "降水量の合計(mm)": 0.0, "平均風速(m/s)": 3.0,
-                "平均湿度(％)": 60.0, "曜日番号": date_obj.weekday()
-            }
-        
-        final_feature_values = []
-        for col_name in self.feature_cols_from_colab:
-            value = raw_weather_features.get(col_name)
-            if value is None:
-                logging.error(f"特征 '{col_name}' 缺失，使用 0。")
-                final_feature_values.append(0)
-            else:
-                final_feature_values.append(value)
-        
-        return pd.DataFrame([final_feature_values], columns=self.feature_cols_from_colab)
+            df_weather = pd.DataFrame({
+                "日付": [date_obj],
+                "最高気温(℃)": [25.0], "平均気温(℃)": [20.0], "最低気温(℃)": [15.0],
+                "降水量の合計(mm)": [0.0], "最大風速(m/s)": [3.0], "平均風速(m/s)": [3.0],
+                "平均湿度(％)": [60.0], "合計全天日射量(MJ/㎡)": [15.0], "平均現地気圧(hPa)": [1013.25],
+                "曜日番号": [date_obj.weekday()]
+            })
+            
+            processed_weather = self._preprocess_weather_data(df_weather)
+            return processed_weather
 
     def predict_sales_for_date(self, date_str):
-        if not self.models:
-            logging.error("模型未加载。无法进行预测。")
+        if not self.unified_model or not self.improved_features or not self.beer_sales_columns:
+            logging.error("统一模型或相关数据未加载。无法进行预测。")
             return {"error": "模型服务未正确初始化。"}
 
-        # 首先检查缓存的预测结果
-        cache_key = f"prediction_{date_str}"
-        if hasattr(self, '_prediction_cache') and cache_key in self._prediction_cache:
-            logging.info(f"从缓存返回预测结果: {date_str}")
-            return self._prediction_cache[cache_key]
-
-        features_df = self._get_future_weather_data_and_prepare_features(date_str)
-        if features_df.empty:
+        # 获取并处理天气数据
+        weather_df = self._get_future_weather_data_and_prepare_features(date_str)
+        if weather_df.empty:
             logging.error("无法为预测准备特征。")
             return {"error": "无法准备预测特征。"}
             
-        # 获取模型（假设所有啤酒使用同一个模型）
-        model_to_use = list(self.models.values())[0] if self.models else None
-        
-        if not model_to_use:
-            logging.error("没有可用的模型。")
-            return {"error": "没有可用的模型。"}
-        
         try:
-            # 进行预测，模型应该输出所有6种啤酒的预测值
-            prediction_result = model_to_use.predict(features_df)
+            # 准备预测特征（确保特征顺序正确）
+            predict_X = weather_df[self.improved_features]
             
-            # 处理预测结果
-            if hasattr(prediction_result, 'flatten'):
-                predictions = prediction_result.flatten()
-            else:
-                predictions = prediction_result[0] if len(prediction_result.shape) > 1 else prediction_result
+            # 使用统一模型进行预测（返回所有6种啤酒的预测值）
+            predictions = self.unified_model.predict(predict_X)[0]  # 取第一行（只预测一天）
             
-            # 确保有6个预测值（对应6种啤酒）
-            if len(predictions) >= 6:
-                beer_predictions = {
-                    "ペールエール(本)": max(0, int(round(float(predictions[0])))),
-                    "ラガー(本)": max(0, int(round(float(predictions[1])))),
-                    "IPA(本)": max(0, int(round(float(predictions[2])))),
-                    "ホワイトビール(本)": max(0, int(round(float(predictions[3])))),
-                    "黒ビール(本)": max(0, int(round(float(predictions[4])))),
-                    "フルーツビール(本)": max(0, int(round(float(predictions[5]))))
-                }
-            else:
-                # 如果预测值不足6个，使用相同的值
-                default_value = max(0, int(round(float(predictions[0])))) if len(predictions) > 0 else 5
-                beer_predictions = {
-                    "ペールエール(本)": default_value,
-                    "ラガー(本)": default_value,
-                    "IPA(本)": default_value,
-                    "ホワイトビール(本)": default_value,
-                    "黒ビール(本)": default_value,
-                    "フルーツビール(本)": default_value
-                }
-            
-            # 缓存预测结果
-            if not hasattr(self, '_prediction_cache'):
-                self._prediction_cache = {}
-            if len(self._prediction_cache) >= 50:  # 限制缓存大小
-                oldest_key = next(iter(self._prediction_cache))
-                del self._prediction_cache[oldest_key]
-            self._prediction_cache[cache_key] = beer_predictions
+            # 构建预测结果字典
+            beer_predictions = {}
+            for i, beer_name in enumerate(self.beer_sales_columns):
+                beer_predictions[beer_name] = max(0, round(float(predictions[i]), 1))
             
             return beer_predictions
             
@@ -242,22 +290,35 @@ class BeerSalesPredictorAzure:
 
     def predict_weekly_shipment(self, start_date_str):
         """
-        根据起始日期预测一周的出货汇总
-        类似于 Colab notebook 中的发注用ビール出荷集計
+        根据起始日期预测一周的出货汇总（改进版本，包含出货日期和缓存）
         """
-        from datetime import datetime, timedelta
-        
         try:
             start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
         except ValueError:
             return {"error": "日期格式无效"}
         
-        # 生成未来7天的日期
+        # 检查缓存
+        cached_result = self._get_cached_weekly_data(start_date_str)
+        if cached_result is not None:
+            logging.info(f"使用缓存的周预测数据: {start_date_str}")
+            # 从缓存结果构建完整响应
+            result_from_cache = {
+                **cached_result,
+                "from_cache": True,
+                "generated_at": "来自缓存"
+            }
+            return result_from_cache
+        
+        logging.info(f"生成新的周预测数据: {start_date_str}")
+        
+        # 生成未来7天的预测
         daily_predictions = []
+        weekdays_data = {}
+        
         for i in range(7):
             current_date = start_date + timedelta(days=i)
             date_str = current_date.strftime("%Y-%m-%d")
-            weekday = current_date.weekday()  # 0=Monday, 6=Sunday
+            weekday = current_date.weekday()
             
             prediction = self.predict_sales_for_date(date_str)
             if "error" in prediction:
@@ -268,49 +329,82 @@ class BeerSalesPredictorAzure:
                 "weekday": weekday,
                 "predictions": prediction
             })
+            
+            # 记录每个weekday对应的日期
+            weekdays_data[weekday] = current_date
         
         if not daily_predictions:
             return {"error": "无法生成预测数据"}
         
-        # 按照 Colab 逻辑分组：
-        # 月曜用（火水木 = weekday 1,2,3）
-        # 木曜用（金土日 = weekday 4,5,6,0）
-        monday_group = []  # 火水木
-        thursday_group = []  # 金土日月
+        # 按照改进的逻辑分组
+        monday_group = []  # 月火水 (weekday 0,1,2)
+        thursday_group = []  # 木金土 (weekday 3,4,5)
         
         for pred in daily_predictions:
             weekday = pred["weekday"]
-            if weekday in [1, 2, 3]:  # 火水木
+            if weekday in [0, 1, 2]:  # 月火水
                 monday_group.append(pred)
-            elif weekday in [4, 5, 6, 0]:  # 金土日月
+            elif weekday in [3, 4, 5]:  # 木金土
                 thursday_group.append(pred)
         
         # 计算汇总
         def sum_group(group):
-            total = {
-                "ペールエール(本)": 0,
-                "ラガー(本)": 0, 
-                "IPA(本)": 0,
-                "ホワイトビール(本)": 0,
-                "黒ビール(本)": 0,
-                "フルーツビール(本)": 0
-            }
+            total = {beer: 0 for beer in self.beer_sales_columns}
             for pred in group:
                 for beer, quantity in pred["predictions"].items():
                     if beer in total:
                         total[beer] += quantity
             return total
         
-        monday_sum = sum_group(monday_group)
-        thursday_sum = sum_group(thursday_group)
+        results = {}
         
-        return {
-            "🍻 発注用ビール出荷集計": {
-                "月曜用の出荷集計": monday_sum,
-                "木曜用の出荷集計": thursday_sum
-            },
-            "daily_details": daily_predictions
+        # 检查月曜用的发货日（月0、火1、水2）是否都存在
+        if set([0, 1, 2]).issubset(set(weekdays_data.keys())):
+            monday_sum = sum_group(monday_group)
+            
+            # 计算下一个周一的日期作为出货日
+            today = start_date.date()
+            next_monday = today + timedelta(days=(7 - today.weekday()) % 7)
+            
+            results["月曜用の出荷集計"] = {
+                "出荷日": next_monday.strftime("%Y-%m-%d"),
+                **monday_sum
+            }
+        
+        # 检查木曜用的发货日（木3、金4、土5）是否都存在
+        if set([3, 4, 5]).issubset(set(weekdays_data.keys())):
+            thursday_sum = sum_group(thursday_group)
+            
+            # 找到木曜日的日期作为出货日
+            thursday_date = weekdays_data.get(3)  # weekday 3 = 木曜日
+            if thursday_date:
+                results["木曜用の出荷集計"] = {
+                    "出荷日": thursday_date.strftime("%Y-%m-%d"),
+                    **thursday_sum
+                }
+        
+        if not results:
+            return {"error": "月曜用・木曜用いずれも発注日が不足しています。"}
+        
+        # 构建最终结果
+        final_result = {
+            "🍻 発注用ビール出荷集計": results,
+            "daily_details": daily_predictions,
+            "comment": "出荷日付を含む改良版集計",
+            "from_cache": False,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+        
+        # 缓存结果（不包含 from_cache 和 generated_at 字段）
+        cache_data = {
+            "🍻 発注用ビール出荷集計": results,
+            "daily_details": daily_predictions,
+            "comment": "出荷日付を含む改良版集計"
+        }
+        self._cache_weekly_data(start_date_str, cache_data)
+        logging.info(f"已缓存周预测数据: {start_date_str}")
+        
+        return final_result
 
 # 全局初始化预测器实例
 try:
@@ -322,11 +416,11 @@ except Exception as e:
 @app.route(route="predict", methods=["GET"])
 def predict_beer_sales(req: func.HttpRequest) -> func.HttpResponse:
     """
-    实际的啤酒销售预测 API
+    改进的啤酒销售预测 API（基于统一RandomForest模型）
     """
-    logging.info('实际的啤酒销售预测 API 被调用')
+    logging.info('改进的啤酒销售预测 API 被调用')
 
-    if predictor is None or not predictor.models:
+    if predictor is None or not predictor.unified_model:
         logging.error("预测器服务未初始化或模型未加载。")
         return func.HttpResponse(
              json.dumps({"error": "预测服务当前不可用，请稍后重试。"}),
@@ -337,7 +431,7 @@ def predict_beer_sales(req: func.HttpRequest) -> func.HttpResponse:
 
     request_date_str = req.params.get('date')
     if not request_date_str:
-        logging.warning("未提供日期参数，将使用默认日期。")
+        logging.warning("未提供日期参数，将使用当前日期。")
         request_date_str = datetime.now().strftime("%Y-%m-%d")
 
     try:
@@ -356,7 +450,12 @@ def predict_beer_sales(req: func.HttpRequest) -> func.HttpResponse:
     response_data = {
         "requested_date": request_date_str,
         "predictions": predictions_result,
-        "comment": "実際の機械学習モデル予測データ"
+        "model_info": {
+            "type": "Unified RandomForest MultiOutput",
+            "features_count": len(predictor.improved_features) if predictor.improved_features else 0,
+            "cached_weather": request_date_str in predictor._weather_cache
+        },
+        "comment": "rf.ipynb ベースの統一RandomForest予測"
     }
 
     return func.HttpResponse(
@@ -369,11 +468,11 @@ def predict_beer_sales(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="weekly", methods=["GET"])
 def predict_weekly_beer_shipment(req: func.HttpRequest) -> func.HttpResponse:
     """
-    周単位のビール出荷予測 API（Colab notebook 形式）
+    周単位のビール出荷予測 API（改进版本）
     """
     logging.info('週単位ビール出荷予測 API が呼び出されました')
 
-    if predictor is None or not predictor.models:
+    if predictor is None or not predictor.unified_model:
         logging.error("予測器サービスが初期化されていないか、モデルが読み込まれていません。")
         return func.HttpResponse(
              json.dumps({"error": "予測サービスは現在利用できません。しばらくしてから再試行してください。"}),
@@ -403,7 +502,7 @@ def predict_weekly_beer_shipment(req: func.HttpRequest) -> func.HttpResponse:
     response_data = {
         "start_date": request_date_str,
         "shipment_summary": weekly_predictions,
-        "comment": "Colab notebook形式の週単位出荷予測"
+        "comment": "統一RandomForest モデルによる週単位出荷予測"
     }
 
     return func.HttpResponse(
@@ -415,27 +514,66 @@ def predict_weekly_beer_shipment(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="health", methods=["GET"])
 def health_check(req: func.HttpRequest) -> func.HttpResponse:
-    """ヘルスチェック"""
-    ok = predictor is not None and predictor.models and len(predictor.models) > 0
+    """改进的ヘルスチェック"""
+    ok = (predictor is not None and 
+          predictor.unified_model is not None and 
+          predictor.improved_features is not None and 
+          predictor.beer_sales_columns is not None)
+    
     status_message = "ok" if ok else "error"
     
     models_info = {}
-    label_encoder_loaded = False
-    
     if predictor:
         models_info = {
-            "loaded_models": list(predictor.models.keys()),
-            "models_count": len(predictor.models)
+            "unified_model_loaded": predictor.unified_model is not None,
+            "features_loaded": predictor.improved_features is not None,
+            "beer_columns_loaded": predictor.beer_sales_columns is not None,
+            "features_count": len(predictor.improved_features) if predictor.improved_features else 0,
+            "beer_types_count": len(predictor.beer_sales_columns) if predictor.beer_sales_columns else 0,
+            "weather_cache_size": len(predictor._weather_cache),
+            "weekly_cache_size": len(predictor._weekly_cache)  # 新增：周缓存状态
         }
-        label_encoder_loaded = predictor.weather_label_encoder is not None
     
     return func.HttpResponse(
         json.dumps({
             "status": status_message,
-            "models_info": models_info,
-            "label_encoder_loaded": label_encoder_loaded
+            "model_type": "Unified RandomForest MultiOutput",
+            "models_info": models_info
         }),
         status_code=200 if ok else 503,
         mimetype="application/json",
         charset="utf-8"
     )
+
+# 新增：定时触发器，用于预热缓存
+@app.timer_trigger(schedule="0 0 1 * * *", arg_name="myTimer", run_on_startup=True) 
+def warm_up_cache_timer(myTimer: func.TimerRequest) -> None:
+    """
+    每天凌晨1点自动运行，预测当天的销量并缓存结果。
+    run_on_startup=True 确保函数应用启动时也会运行一次。
+    """
+    if myTimer.past_due:
+        logging.info('定时器函数执行延迟。')
+
+    logging.info('定时缓存预热函数启动。')
+    
+    if predictor is None or not predictor.unified_model:
+        logging.error("预测器服务未初始化，无法预热缓存。")
+        return
+
+    # 预测当天的销量以填充缓存
+    # 注意：Azure Function默认使用UTC时间，如果需要特定时区，请在Azure门户设置WEBSITE_TIME_ZONE
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    logging.info(f"正在为日期 {today_str} 预热缓存...")
+    
+    try:
+        # 调用此方法将自动执行预测并将结果存入缓存
+        predictions = predictor.predict_sales_for_date(today_str)
+        if "error" in predictions:
+            logging.error(f"预热缓存时发生错误: {predictions['error']}")
+        else:
+            logging.info(f"已成功为日期 {today_str} 预热缓存。")
+    except Exception as e:
+        logging.error(f"预热缓存时发生未处理的异常: {e}", exc_info=True)
+
+    logging.info('Python 定时器触发器函数执行完毕。')
