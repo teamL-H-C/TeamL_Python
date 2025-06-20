@@ -31,9 +31,10 @@ BASE_URL: https://teaml-python-predict-api.azurewebsites.net/api
 
 #### 1. 週単位ビール出荷予測 (メイン機能)
 ```http
-GET /weekly?start_date=2025-06-20
+GET /weekly
 ```
-**機能**: 指定した日付から1週間の出荷予測と発注用集計を提供
+**機能**: 現在の日付から1週間の出荷予測と発注用集計を提供
+**パラメータ**: 不要（自動的に今日の日付を使用）
 
 #### 2. システム状態確認
 ```http
@@ -129,6 +130,20 @@ func start
 # API テスト
 curl "http://localhost:7071/api/weekly"
 curl "http://localhost:7071/api/health"
+```
+
+### **🧪 性能テストツール**
+```bash
+# 冷起動・熱起動・Storage性能の専門テスト
+python performance_test.py
+
+# テスト内容:
+# - 冷起動基準測定（Hello World）
+# - 業務ロジック呼び出し（AI予測）
+# - 熱起動効果確認
+# - Azure Storage読み取り速度
+# - 連続呼び出し安定性
+# - システム状態確認
 ```
 
 ---
