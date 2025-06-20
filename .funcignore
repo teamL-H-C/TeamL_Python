@@ -51,41 +51,54 @@ Thumbs.db
 *.log
 logs/
 
-# Jupyter Notebook 文件 (不需要部署)
-*.ipynb
-.ipynb_checkpoints/
-
-# 测试和文档文件
+# 测试和开发文件 (不部署到生产环境)
 tests/
 test_*.py
 *_test.py
+
+# 性能测试脚本 (仅用于开发)
+performance_test*.py
+
+# 文档和报告文件 (不需要部署)
 README.md
 *.md
 docs/
+PERFORMANCE_OPTIMIZATION_REPORT.md
+PRODUCTION_CACHE_GUIDE.md
+azure-function-settings.txt
 
-# 数据文件 (CSV等大文件)
+# 数据文件 (CSV等大文件不部署)
 *.csv
 *.xlsx
 *.xls
+df_merge*.csv
+weather.csv
+クラフトビール売上データ_2024年4月-2025年3月.csv
+
+# Jupyter Notebook 相关文件 (开发用)
+rf.ipynb
+*.ipynb
+.ipynb_checkpoints/
 
 # 临时文件
 *.tmp
 *.temp
 *.bak
 
-# Git 相关
+# Git 相关文件 (不需要部署)
 .git/
 .gitignore
 
-# 项目特定的忽略文件
+# 配置文件
 .funcignore
 
 # Azure Functions 本地设置 (包含敏感信息)
 local.settings.json
 
-# 未使用的模型文件
+# 未使用的模型文件 (仅保留实际使用的模型)
 models/decision_tree_model.joblib
 
-# 其他配置文件
-azure-function-settings.txt
-PRODUCTION_CACHE_GUIDE.md
+# 其他开发工具文件
+.pytest_cache/
+.coverage
+htmlcov/

@@ -4,9 +4,31 @@ __pycache__/
 *$py.class
 *.so
 .Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
 env/
 venv/
 .venv/
+ENV/
+env.bak/
+venv.bak/
 pip-log.txt
 pip-delete-this-directory.txt
 
@@ -16,19 +38,65 @@ local.settings.json
 .azure/
 .func/
 
-# MacOS
-.DS_Store
-
 # IDE
+.idea/
 *.swp
 *.swo
 *~
 
+# Operating System
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
 # Logs
 *.log
+logs/
 
 # Environment variables
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
+# Testing
+tests/
+test_*.py
+*_test.py
+coverage/
+.coverage
+.nyc_output
+
+# Performance testing scripts (development only)
+performance_test*.py
+
+# Data files
+*.csv
+*.xlsx
+*.xls
+df_merge*.csv
 weather.csv
 クラフトビール売上データ_2024年4月-2025年3月.csv
+
+# Jupyter Notebook
+*.ipynb
+.ipynb_checkpoints/
+rf.ipynb
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Documentation and reports (keep in repo but ignore generated ones)
+PERFORMANCE_OPTIMIZATION_REPORT.md
+PRODUCTION_CACHE_GUIDE.md
+azure-function-settings.txt
+
+# Backup models (keep only the ones in use)
+models/decision_tree_model.joblib
